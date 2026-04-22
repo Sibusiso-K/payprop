@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Helpers ───────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(uid())).data.role;
+    }
+
+    function isTenant()    { return userRole() == 'tenant'; }
+    function isAgent()     { return userRole() == 'agent'; }
+    function isHomeowner() { return userRole() == 'homeowner'; }
+
+    // ─── users ─────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read:   if isSignedIn() && (uid() == userId || isAgent());
+      allow create: if isSignedIn() && uid() == userId;
+      allow update: if isSignedIn() && uid() == userId;
+      allow delete: if false;
+    }
+
+    // ─── properties ────────────────────────────────────────────
+    match /properties/{propertyId} {
+      allow read:   if isSignedIn() && (
+                      resource.data.agentId == uid() ||
+                      resource.data.ownerId == uid() ||
+                      // tenants can read the property they're linked to
+                      exists(/databases/$(database)/documents/tenancies/$(propertyId + '_' + uid()))
+                    );
+      allow create: if isSignedIn() && isAgent();
+      allow update: if isSignedIn() && resource.data.agentId == uid();
+      allow delete: if false;
+    }
+
+    // ─── tenancies ─────────────────────────────────────────────
+    match /tenancies/{tenancyId} {
+      allow read:   if isSignedIn() && (
+                      resource.data.tenantId == uid() ||
+                      resource.data.agentId  == uid() ||
+                      resource.data.ownerId  == uid()
+                    );
+      allow create: if isSignedIn() && isAgent();
+      allow update: if isSignedIn() && resource.data.agentId == uid();
+      allow delete: if false;
+    }
+
+    // ─── payments ──────────────────────────────────────────────
+    match /payments/{paymentId} {
+      allow read:   if isSignedIn() && (
+                      resource.data.tenantId == uid() ||
+                      resource.data.agentId  == uid() ||
+                      resource.data.ownerId  == uid()
+                    );
+      // Tenants initiate pending payments; status updates done by Cloud Functions only
+      allow create: if isSignedIn() && isTenant() &&
+                      request.resource.data.tenantId == uid() &&
+                      request.resource.data.status == 'pending';
+      allow update: if false; // Cloud Functions only
+      allow delete: if false;
+    }
+
+    // ─── maintenance ───────────────────────────────────────────
+    match /maintenance/{requestId} {
+      allow read:   if isSignedIn() && (
+                      resource.data.tenantId == uid() ||
+                      resource.data.agentId  == uid() ||
+                      resource.data.ownerId  == uid()
+                    );
+      allow create: if isSignedIn() && isTenant() &&
+                      request.resource.data.tenantId == uid() &&
+                      request.resource.data.status == 'submitted';
+      allow update: if isSignedIn() && (
+                      resource.data.agentId == uid() ||
+                      resource.data.ownerId == uid()
+                    );
+      allow delete: if false;
+    }
+
+    // ─── documents ─────────────────────────────────────────────
+    match /documents/{docId} {
+      allow read:   if isSignedIn() &&
+                      uid() in resource.data.visibleTo;
+      allow create: if isSignedIn() && (isAgent() || isHomeowner()) &&
+                      uid() == request.resource.data.uploadedBy;
+      allow update: if isSignedIn() &&
+                      uid() == resource.data.uploadedBy;
+      allow delete: if isSignedIn() &&
+                      uid() == resource.data.uploadedBy;
+    }
+
+    // ─── messages ──────────────────────────────────────────────
+    match /messages/{threadId} {
+      allow read:   if isSignedIn() && uid() in resource.data.participants;
+      allow create: if isSignedIn() && uid() in request.resource.data.participants;
+      allow update: if isSignedIn() && uid() in resource.data.participants;
+      allow delete: if false;
+
+      match /chats/{messageId} {
+        allow read:   if isSignedIn() &&
+                        uid() in get(/databases/$(database)/documents/messages/$(threadId)).data.participants;
+        allow create: if isSignedIn() &&
+                        uid() in get(/databases/$(database)/documents/messages/$(threadId)).data.participants &&
+                        request.resource.data.senderId == uid();
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+  }
+}
